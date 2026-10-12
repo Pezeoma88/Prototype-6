@@ -21,8 +21,16 @@ import {
   profileToAccount,
 } from './lib/board';
 import { AvatarError, pickAvatarImage, uploadAvatar } from './lib/avatar';
+import {
+  CONFIRM_CHECK_DELAYS_MS,
+  confirmRideRequestOutcome,
+  lookupRideRequest,
+  submitRideRequest,
+  withdrawRideRequest,
+} from './lib/rideRequests';
 import { colors } from './theme/theme';
 import TabBar from './components/TabBar';
+import { DemoNetworkBanner } from './components/DemoNetworkPanel';
 import SignInScreen from './screens/SignInScreen';
 import HomeScreen from './screens/HomeScreen';
 import RideDetailsScreen from './screens/RideDetailsScreen';
@@ -50,8 +58,9 @@ import EditProfileScreen from './screens/EditProfileScreen';
 export default function App() {
   // The list of drivers (posted rides), rebuilt from Supabase on every load.
   // Each driver is an object like
-  // { id, driverAccountId, name, destination, departureAt, departureTime,
-  //   totalSeats, seats, matchedRiders, pendingRequests }.
+  // { id, driverAccountId, name, destination, pickup, departureAt,
+  //   departureTime, totalSeats, seats, matchedRiders, pendingRequests }.
+  // pickup is { latitude, longitude, label } or null when the ride has none.
   // id is the ride's Supabase UUID; departureAt is a Date and departureTime
   // its display string. seats is the number of AVAILABLE seats
   // (totalSeats - accepted requests), so it only goes down on Accept.
@@ -134,6 +143,10 @@ export default function App() {
   // one of them: it comes from the signed-in account when the ride is posted.
   const [destinationInput, setDestinationInput] = useState('');
   const [seatsInput, setSeatsInput] = useState('');
+  // The pickup spot chosen in the form: { latitude, longitude, label } from
+  // the preset list (lib/pickupLocations.js), or null for no pickup spot.
+  // Optional: a ride without one just isn't shown on the Map tab.
+  const [pickupInput, setPickupInput] = useState(null);
 
   // The departure picked on the date/time wheels (a Date), or null until the
   // driver picks one. Saved to Supabase as rides.departure_at.
@@ -168,6 +181,19 @@ export default function App() {
   const [activeRequestRows, setActiveRequestRows] = useState([]);
   // Profiles referenced by the loaded rides/requests, keyed by id.
   const [profilesById, setProfilesById] = useState({});
+
+  // The signed-in person's own request rows in EVERY status, from the last
+  // load. The board only loads pending/accepted, but a denied or cancelled
+  // request is final for that ride, so the app has to know about those too.
+  const [myRequestRows, setMyRequestRows] = useState([]);
+  // The signed-in profile id, readable from loadBoard (which is created once
+  // and so can't see the latest currentUser). Set on sign-in and sign-out.
+  const currentUserIdRef = useRef(null);
+  // My request status per ride id: 'pending', 'accepted', 'denied', or
+  // 'cancelled' (missing when I've never requested that ride).
+  const myRequestStatusByRideId = Object.fromEntries(
+    myRequestRows.map((row) => [row.ride_id, row.status])
+  );
 
   // Guards against a fast double-tap firing the same Supabase change twice.
   const isBoardActionRunningRef = useRef(false);
@@ -215,6 +241,23 @@ export default function App() {
   // shown to the driver alongside their Pending request.
   const [requestReasonInput, setRequestReasonInput] = useState('');
 
+  // Submit Ride Request, the operation that completes later. null when
+  // nothing is in progress or waiting to be read; otherwise
+  // { rideId, riderId, reason, phase, ... } where phase is one of
+  // submitting / checking / success / arrived / existing / refused /
+  // not_found / unknown / withdrawing (described in RequestSubmissionPanel).
+  // It lives here rather than in Ride Details so the outcome survives
+  // leaving that screen and is still there when the rider comes back.
+  const [requestSubmission, setRequestSubmission] = useState(null);
+  // Counts submission "attempts". Every piece of async work remembers the
+  // number it started with and drops its result if the number has moved on
+  // (the rider abandoned, retried, left, switched mode, or signed out), so
+  // a late answer can never show a stale message.
+  const submissionAttemptRef = useRef(0);
+  // The AbortController of the submission currently waiting on the server,
+  // or null. Also the guard against a double-tap sending twice.
+  const submissionAbortRef = useRef(null);
+
   // Which bottom tab is showing: 'home', 'map', 'requests', or 'profile'.
   // The Profile tab replaces Prototype 4's Profile overlay.
   const [activeTab, setActiveTab] = useState('home');
@@ -233,7 +276,9 @@ export default function App() {
     try {
       const { data: rideRows, error: ridesError } = await supabase
         .from('rides')
-        .select('id, driver_id, destination, departure_at, seat_count, created_at')
+        .select(
+          'id, driver_id, destination, departure_at, seat_count, created_at, pickup_lat, pickup_lng, pickup_label'
+        )
         .order('created_at', { ascending: true })
         .order('id', { ascending: true });
       if (ridesError) throw ridesError;
@@ -261,6 +306,23 @@ export default function App() {
           .in('id', profileIds);
         if (profilesError) throw profilesError;
         profileMap = Object.fromEntries(profileRows.map((row) => [row.id, row]));
+      }
+
+      // The signed-in person's own requests, including denied/cancelled.
+      const myProfileId = currentUserIdRef.current;
+      let myRows = [];
+      if (myProfileId) {
+        const { data: myRequestData, error: myRequestsError } = await supabase
+          .from('ride_requests')
+          .select('id, ride_id, rider_id, reason, status, created_at')
+          .eq('rider_id', myProfileId)
+          .order('created_at', { ascending: false });
+        if (myRequestsError) throw myRequestsError;
+        myRows = myRequestData;
+      }
+      // Skip if someone else signed in (or out) while this was loading.
+      if (currentUserIdRef.current === myProfileId) {
+        setMyRequestRows(myRows);
       }
 
       setProfilesById(profileMap);
@@ -391,6 +453,7 @@ export default function App() {
         }
       }
 
+      currentUserIdRef.current = account.id;
       setCurrentUser(account);
       setActiveMode(authRole);
       setAuthNameInput('');
@@ -408,6 +471,12 @@ export default function App() {
   // Signs the current account out. The shared board (drivers/riders) is left
   // untouched so the next person to sign in still sees the same board.
   function handleSignOut() {
+    // Stop and forget any ride request in flight: there's no one left to
+    // show its outcome to. If it reached the server, the next sign-in shows
+    // it as Pending straight from Supabase.
+    resetRequestSubmission();
+    currentUserIdRef.current = null;
+    setMyRequestRows([]);
     setCurrentUser(null);
     setActiveMode(null);
     resetProfileForm();
@@ -436,6 +505,13 @@ export default function App() {
     setReservingDriverId(null);
     setRequestReasonInput('');
     setRequestNotice('');
+    // A ride request still in flight is dropped along with its messages, so
+    // nothing from Rider mode can pop up in Driver mode. The reload shows
+    // whatever actually reached the server.
+    if (requestSubmission !== null) {
+      resetRequestSubmission();
+      loadBoard();
+    }
     setActiveMode((current) => (current === 'driver' ? 'rider' : 'driver'));
   }
 
@@ -652,6 +728,7 @@ export default function App() {
     }
     setEditingRideId(driver.id);
     setDestinationInput(driver.destination);
+    setPickupInput(driver.pickup);
     setDepartureAtInput(driver.departureAt);
     setOriginalDepartureAt(driver.departureAt);
     setSeatsInput(String(driver.totalSeats));
@@ -671,6 +748,7 @@ export default function App() {
     setIsAddingDriver(false);
     setEditingRideId(null);
     setDestinationInput('');
+    setPickupInput(null);
     setDepartureAtInput(null);
     setOriginalDepartureAt(null);
     setDeparturePickerMode(null);
@@ -764,6 +842,14 @@ export default function App() {
     setIsSubmittingDriver(true);
     setFormError('');
 
+    // The pickup spot is optional. All three columns are saved together, or
+    // all cleared, which is what the database's pickup checks require.
+    const pickupFields = {
+      pickup_lat: pickupInput ? pickupInput.latitude : null,
+      pickup_lng: pickupInput ? pickupInput.longitude : null,
+      pickup_label: pickupInput ? pickupInput.label : null,
+    };
+
     try {
       if (editingDriver) {
         // Re-check confirmed riders against the server right before saving,
@@ -789,6 +875,7 @@ export default function App() {
             destination: trimmedDestination,
             departure_at: departureAtInput.toISOString(),
             seat_count: seatsNumber,
+            ...pickupFields,
           })
           .eq('id', editingDriver.id)
           .eq('driver_id', currentUser.id)
@@ -803,6 +890,7 @@ export default function App() {
           destination: trimmedDestination,
           departure_at: departureAtInput.toISOString(),
           seat_count: seatsNumber,
+          ...pickupFields,
         });
         if (error) throw error;
       }
@@ -833,6 +921,7 @@ export default function App() {
 
   // Closes the Ride Details screen (and any in-progress matching) and returns to Available Rides.
   function handleBackToAvailableRides() {
+    handleLeaveRequestSubmission();
     setSelectedRideDriverId(null);
     setReservingDriverId(null);
     setRequestNotice('');
@@ -899,10 +988,14 @@ export default function App() {
     setRequestReasonInput('');
   }
 
-  // SPIKE, step 1: a waiting rider requests this specific ride, optionally
-  // with a short reason so the driver has context when deciding. The request
-  // is saved to ride_requests as Pending. Seats do NOT change yet, and the
-  // rider stays in the waiting list (they could still request other rides).
+  // A waiting rider requests this specific ride, optionally with a short
+  // reason so the driver has context when deciding. Seats do NOT change
+  // yet, and the rider stays in the waiting list.
+  //
+  // The request goes through the submit_ride_request database function,
+  // which creates a Pending row only when this rider has no row for the
+  // ride and otherwise returns the existing one untouched. A denied or
+  // cancelled request is final: it is never reopened.
   async function handleRequestRide(driverId, riderId, reason) {
     const driver = drivers.find((d) => d.id === driverId);
     const rider = currentUser && currentUser.id === riderId ? currentUser : null;
@@ -916,6 +1009,8 @@ export default function App() {
       return;
     }
 
+    // Quick answers from what's already on screen. The server re-checks all
+    // of these, since the screen can be out of date.
     if (driver.seats < 1) {
       setRequestNotice('This ride is full, so it is not accepting requests.');
       return;
@@ -928,61 +1023,293 @@ export default function App() {
       setRequestNotice(`${rider.name} already has a pending request for this ride.`);
       return;
     }
+    const myStatus = myRequestStatusByRideId[driverId];
+    if (myStatus === 'denied' || myStatus === 'cancelled') {
+      setRequestNotice(
+        `Your request for this ride was ${myStatus}, so it can't be sent again.`
+      );
+      return;
+    }
 
-    const trimmedReason = reason ? reason.trim() : '';
-
-    await runBoardAction(async () => {
-      // A rider who was denied, or who gave up a seat, keeps an old row for
-      // this ride. Re-requesting reopens that row as Pending instead of
-      // adding a second one.
-      const { data: existingRows, error: lookupError } = await supabase
-        .from('ride_requests')
-        .select('id, status')
-        .eq('ride_id', driverId)
-        .eq('rider_id', rider.id);
-      if (lookupError) {
-        console.warn('CarpoolBoard: request lookup failed', lookupError);
-        setRequestNotice("Couldn't send your request. Check your connection and try again.");
-        return;
-      }
-      if (existingRows.some((row) => row.status === 'accepted')) {
-        setRequestNotice(`${rider.name} is already a confirmed passenger on this ride.`);
-        return;
-      }
-      if (existingRows.some((row) => row.status === 'pending')) {
-        setRequestNotice(`${rider.name} already has a pending request for this ride.`);
-        return;
-      }
-
-      const { error } =
-        existingRows.length > 0
-          ? await supabase
-              .from('ride_requests')
-              .update({ status: 'pending', reason: trimmedReason || null })
-              .eq('id', existingRows[0].id)
-          : await supabase.from('ride_requests').insert({
-              ride_id: driverId,
-              rider_id: rider.id,
-              reason: trimmedReason || null,
-              status: 'pending',
-            });
-      if (error) {
-        // P0001 = an error raised on purpose by the database (e.g. the
-        // prevent_self_request trigger), whose message is meant for users.
-        console.warn('CarpoolBoard: sending request failed', error);
-        setRequestNotice(
-          error.code === 'P0001' && error.message
-            ? error.message
-            : "Couldn't send your request. Check your connection and try again."
-        );
-        return;
-      }
-
-      setReservingDriverId(null);
-      setRequestReasonInput('');
-      setRequestNotice(`${rider.name}'s request is now Pending.`);
-    });
+    Keyboard.dismiss();
+    setRequestNotice('');
+    await runRequestSubmission(driverId, reason ? reason.trim() : '');
   }
+
+  // Moves on to a new submission attempt, which makes every earlier
+  // attempt's unfinished work stale. Returns the new attempt number.
+  function nextSubmissionAttempt() {
+    submissionAttemptRef.current += 1;
+    return submissionAttemptRef.current;
+  }
+
+  // The parts of a submission that stay the same through every phase.
+  function submissionBase(submission) {
+    return {
+      rideId: submission.rideId,
+      riderId: submission.riderId,
+      reason: submission.reason,
+    };
+  }
+
+  // Drops the current submission completely: stops waiting on the server,
+  // makes any unfinished work stale, and clears what's on screen. Used when
+  // the outcome no longer has an audience (sign-out, mode switch).
+  function resetRequestSubmission() {
+    nextSubmissionAttempt();
+    if (submissionAbortRef.current) {
+      submissionAbortRef.current.abort();
+      submissionAbortRef.current = null;
+    }
+    setRequestSubmission(null);
+  }
+
+  // Shows the rider's request row exactly as the server reported it. Only a
+  // Pending row counts as a sent request; accepted/denied/cancelled rows
+  // were already there and were left unchanged.
+  function showServerRow(base, row, cause) {
+    // The request-confirm form for this ride has done its job.
+    setReservingDriverId((current) => (current === base.rideId ? null : current));
+    if (row.status === 'pending') {
+      // After abandoning, a Pending row means it arrived anyway, and the
+      // rider gets to decide whether to keep it.
+      setRequestSubmission({
+        ...base,
+        phase: cause === 'abandoned' ? 'arrived' : 'success',
+        cause,
+        row,
+      });
+    } else {
+      setRequestSubmission({ ...base, phase: 'existing', cause, row });
+    }
+  }
+
+  // WAITING -> SUCCESS / FAILURE. Sends the request and waits for the
+  // server. Also used by Try Again: repeating it is safe because the
+  // database function never creates a second row or changes a status.
+  async function runRequestSubmission(rideId, reason) {
+    // One submission at a time; ignores a double-tap on Confirm Request.
+    if (submissionAbortRef.current || !currentUser || activeMode !== 'rider') {
+      return;
+    }
+    const base = { rideId, riderId: currentUser.id, reason };
+    const attempt = nextSubmissionAttempt();
+    const controller = new AbortController();
+    submissionAbortRef.current = controller;
+    setRequestSubmission({ ...base, phase: 'submitting' });
+
+    const result = await submitRideRequest({ ...base, signal: controller.signal });
+
+    if (submissionAbortRef.current === controller) {
+      submissionAbortRef.current = null;
+    }
+    // Abandoned, superseded, or signed out while waiting: this answer is
+    // stale. Whoever moved on is responsible for checking with the server.
+    if (attempt !== submissionAttemptRef.current) {
+      return;
+    }
+
+    if (result.kind === 'row') {
+      showServerRow(base, result.row, 'submitted');
+      loadBoard();
+      return;
+    }
+    if (result.kind === 'refused') {
+      setRequestSubmission({
+        ...base,
+        phase: 'refused',
+        message: result.message,
+        retryable: result.retryable,
+      });
+      loadBoard();
+      return;
+    }
+    // Timed out or the network failed: the request may still have been
+    // saved, so ask the server instead of calling it a failure.
+    await confirmSubmissionOutcome(base, result.cause, attempt);
+  }
+
+  // Asks the server what it actually holds after a submission whose answer
+  // never arrived (abandoned, timed out, or network error). It checks
+  // several times, because a request already on its way can still land
+  // after the first check, and only then reports "none found".
+  async function confirmSubmissionOutcome(base, cause, attempt) {
+    const checking = { ...base, phase: 'checking', cause };
+    setRequestSubmission({
+      ...checking,
+      checkNumber: 1,
+      checkTotal: CONFIRM_CHECK_DELAYS_MS.length,
+    });
+
+    const outcome = await confirmRideRequestOutcome({
+      rideId: base.rideId,
+      riderId: base.riderId,
+      isCurrent: () => attempt === submissionAttemptRef.current,
+      onCheck: (checkNumber, checkTotal) =>
+        setRequestSubmission({ ...checking, checkNumber, checkTotal }),
+    });
+    if (outcome.kind === 'stale' || attempt !== submissionAttemptRef.current) {
+      return;
+    }
+
+    if (outcome.kind === 'found') {
+      showServerRow(base, outcome.row, cause);
+    } else if (outcome.kind === 'not_found') {
+      setRequestSubmission({ ...base, phase: 'not_found', cause, checks: outcome.checks });
+    } else {
+      setRequestSubmission({ ...base, phase: 'unknown', cause });
+    }
+    loadBoard();
+  }
+
+  // ABANDONMENT. The rider stops waiting. This only stops the phone from
+  // waiting: it can't take back a request the server already received, so
+  // the next step is always to check what the server holds.
+  function handleAbandonSubmission() {
+    const submission = requestSubmission;
+    if (!submission || submission.phase !== 'submitting') {
+      return;
+    }
+    const attempt = nextSubmissionAttempt();
+    if (submissionAbortRef.current) {
+      submissionAbortRef.current.abort();
+      submissionAbortRef.current = null;
+    }
+    confirmSubmissionOutcome(submissionBase(submission), 'abandoned', attempt);
+  }
+
+  // RETRY. Sends the same request again after a failure.
+  function handleRetrySubmission() {
+    const submission = requestSubmission;
+    if (!submission || !['not_found', 'unknown', 'refused'].includes(submission.phase)) {
+      return;
+    }
+    runRequestSubmission(submission.rideId, submission.reason);
+  }
+
+  // Runs the server checks again (e.g. once the connection is back).
+  function handleCheckSubmissionAgain() {
+    const submission = requestSubmission;
+    if (!submission || !['not_found', 'unknown'].includes(submission.phase)) {
+      return;
+    }
+    confirmSubmissionOutcome(
+      submissionBase(submission),
+      submission.cause,
+      nextSubmissionAttempt()
+    );
+  }
+
+  // Closes the outcome panel. A request that arrived stays Pending.
+  function handleDismissSubmission() {
+    nextSubmissionAttempt();
+    setRequestSubmission(null);
+  }
+
+  // Leaving Ride Details (Back, or another tab). Leaving while a request is
+  // still being sent counts as abandoning it: the check with the server
+  // carries on in the background and its outcome is waiting when the rider
+  // comes back to that ride. A finished outcome that needs no decision is
+  // cleared so it can't reappear later as an old message.
+  function handleLeaveRequestSubmission() {
+    if (!requestSubmission) {
+      return;
+    }
+    if (requestSubmission.phase === 'submitting') {
+      handleAbandonSubmission();
+    } else if (['success', 'existing', 'refused'].includes(requestSubmission.phase)) {
+      handleDismissSubmission();
+    }
+  }
+
+  // The rider withdraws a request that had already reached the server when
+  // they stopped waiting. It's only reported as withdrawn once the server
+  // confirms; until then it is still Pending.
+  function handleWithdrawArrivedRequest() {
+    const submission = requestSubmission;
+    if (!submission || submission.phase !== 'arrived' || !submission.row) {
+      return;
+    }
+    const promptedAttempt = submissionAttemptRef.current;
+
+    Alert.alert(
+      'Withdraw this request?',
+      "This cancels your request for this ride. It's permanent: you won't be able to request this same ride again.",
+      [
+        { text: 'Keep Request', style: 'cancel' },
+        {
+          text: 'Withdraw',
+          style: 'destructive',
+          onPress: async () => {
+            // Something else happened while the prompt was open.
+            if (submissionAttemptRef.current !== promptedAttempt) {
+              return;
+            }
+            const attempt = nextSubmissionAttempt();
+            const base = submissionBase(submission);
+            const { row, cause } = submission;
+            setRequestSubmission({ ...base, phase: 'withdrawing', cause, row });
+
+            const result = await withdrawRideRequest(row.id);
+            if (attempt !== submissionAttemptRef.current) {
+              return;
+            }
+            if (result.ok) {
+              setRequestSubmission({
+                ...base,
+                phase: 'existing',
+                cause,
+                row: result.row,
+                withdrawn: true,
+              });
+              loadBoard();
+              return;
+            }
+
+            // Not withdrawn. Either the driver answered first (the row is
+            // no longer pending) or the server couldn't be reached.
+            const check = await lookupRideRequest(base);
+            if (attempt !== submissionAttemptRef.current) {
+              return;
+            }
+            if (check.ok && check.row && check.row.status !== 'pending') {
+              showServerRow(base, check.row, cause);
+            } else {
+              setRequestSubmission({
+                ...base,
+                phase: 'arrived',
+                cause,
+                row,
+                message:
+                  "Couldn't withdraw your request, so it is still Pending. Check your connection and try again.",
+              });
+            }
+            loadBoard();
+          },
+        },
+      ],
+      { cancelable: true }
+    );
+  }
+
+  // A request that wasn't on the server when the app checked can still
+  // arrive afterwards. Every board reload brings the rider's rows, so if
+  // one has appeared for the ride in question, show it instead of leaving
+  // "none found" on screen.
+  useEffect(() => {
+    if (!requestSubmission || !['not_found', 'unknown'].includes(requestSubmission.phase)) {
+      return;
+    }
+    const row = myRequestRows.find(
+      (r) => r.ride_id === requestSubmission.rideId && r.rider_id === requestSubmission.riderId
+    );
+    if (!row) {
+      return;
+    }
+    nextSubmissionAttempt();
+    showServerRow(submissionBase(requestSubmission), row, requestSubmission.cause);
+    // Only a fresh load of the rider's rows should trigger this.
+  }, [myRequestRows]);
 
   // SPIKE, step 2a: the driver accepts a pending request.
   // The rider becomes a confirmed passenger, available seats go down by 1,
@@ -1088,7 +1415,8 @@ export default function App() {
 
     Alert.alert(
       'Cancel your seat?',
-      `You'll give up your confirmed seat on ${driver.name}'s ride to ${driver.destination}.`,
+      `You'll give up your confirmed seat on ${driver.name}'s ride to ${driver.destination}. ` +
+        "This is permanent: you won't be able to request this same ride again.",
       [
         { text: 'Keep My Seat', style: 'cancel' },
         {
@@ -1120,6 +1448,55 @@ export default function App() {
       ],
       { cancelable: true }
     );
+  }
+
+  // A rider withdraws one of their own Pending requests from the Requests
+  // tab. It's marked cancelled only if it is still pending on the server, so
+  // this can't overwrite a driver's Accept or Deny. Cancelled is final for
+  // that ride, so we confirm first.
+  function handleWithdrawRequest(requestId) {
+    const row = myRequestRows.find((r) => r.id === requestId);
+    if (!row || row.status !== 'pending' || !currentUser || row.rider_id !== currentUser.id) {
+      return;
+    }
+    const driver = drivers.find((d) => d.id === row.ride_id);
+
+    Alert.alert(
+      'Withdraw this request?',
+      `This cancels your request${driver ? ` for ${driver.name}'s ride to ${driver.destination}` : ''}. ` +
+        "It's permanent: you won't be able to request this same ride again.",
+      [
+        { text: 'Keep Request', style: 'cancel' },
+        {
+          text: 'Withdraw',
+          style: 'destructive',
+          onPress: () =>
+            runBoardAction(async () => {
+              const result = await withdrawRideRequest(requestId);
+              if (!result.ok) {
+                setRequestNotice(
+                  "Couldn't withdraw this request. It may have already been answered. Pull down to refresh."
+                );
+                return;
+              }
+              // An outcome panel still open for this ride would now be out
+              // of date.
+              if (requestSubmission !== null && requestSubmission.rideId === row.ride_id) {
+                handleDismissSubmission();
+              }
+              setRequestNotice('Request withdrawn.');
+            }),
+        },
+      ],
+      { cancelable: true }
+    );
+  }
+
+  // Opens a ride's details from the Map or Requests tab. Ride Details lives
+  // on the Home tab, so this switches there first.
+  function handleOpenRideFromTab(driverId) {
+    setActiveTab('home');
+    handleViewRideDetails(driverId);
   }
 
   // Dismisses the Match Confirmed screen and returns to the normal home view.
@@ -1171,7 +1548,7 @@ export default function App() {
 
     Alert.alert(
       'Stop looking for a ride?',
-      'This also cancels any pending requests you have sent.',
+      "This also cancels any pending requests you have sent. That's permanent: you won't be able to request those same rides again.",
       [
         { text: 'Stay on the List', style: 'cancel' },
         {
@@ -1218,6 +1595,17 @@ export default function App() {
     detailsDriver.driverAccountId === currentUser.id;
   const isCurrentUserWaiting =
     currentUser !== null && riders.some((rider) => rider.id === currentUser.id);
+  // The Submit Ride Request state to show on the open ride: only the
+  // signed-in rider's own submission for exactly this ride, in Rider mode.
+  const detailsSubmission =
+    requestSubmission !== null &&
+    currentUser !== null &&
+    activeMode === 'rider' &&
+    detailsDriver !== null &&
+    requestSubmission.rideId === detailsDriver.id &&
+    requestSubmission.riderId === currentUser.id
+      ? requestSubmission
+      : null;
 
   // Available Rides in the chosen order. Sorting a copy keeps `drivers`
   // itself in posting order, which is what "Default" shows. Departure Time
@@ -1274,6 +1662,11 @@ export default function App() {
     if (!currentUser) {
       return;
     }
+    // A denied or cancelled request is final for that ride.
+    const myStatus = myRequestStatusByRideId[driverId];
+    if (myStatus === 'denied' || myStatus === 'cancelled') {
+      return;
+    }
     setLocalWaitingRiders((current) =>
       current.some((r) => r.id === currentUser.id)
         ? current
@@ -1292,6 +1685,7 @@ export default function App() {
 
   // Tapping your avatar on Home opens the Profile tab.
   function handleOpenProfile() {
+    handleLeaveRequestSubmission();
     setActiveTab('profile');
   }
 
@@ -1301,6 +1695,11 @@ export default function App() {
     Keyboard.dismiss();
     if (tabKey === 'home' && activeTab === 'home') {
       handleBackToAvailableRides();
+    } else if (tabKey !== activeTab) {
+      // Switching tabs hides Ride Details, which counts as leaving it.
+      handleLeaveRequestSubmission();
+      // A message about the last action belongs to the screen it happened on.
+      setRequestNotice('');
     }
     setActiveTab(tabKey);
   }
@@ -1336,6 +1735,13 @@ export default function App() {
         activeMode={activeMode}
         handleSwitchMode={handleSwitchMode}
         requestNotice={requestNotice}
+        requestSubmission={detailsSubmission}
+        myRequestStatus={myRequestStatusByRideId[detailsDriver.id] || null}
+        handleAbandonSubmission={handleAbandonSubmission}
+        handleRetrySubmission={handleRetrySubmission}
+        handleCheckSubmissionAgain={handleCheckSubmissionAgain}
+        handleDismissSubmission={handleDismissSubmission}
+        handleWithdrawArrivedRequest={handleWithdrawArrivedRequest}
         isOwnerDriver={isOwnerDriver}
         isOwnDetailsRide={isOwnDetailsRide}
         reservingDriverId={reservingDriverId}
@@ -1353,6 +1759,15 @@ export default function App() {
       />
     ) : null;
 
+  // Pending requests waiting on the signed-in driver, shown as a count on
+  // the Requests tab while they're in Driver mode.
+  const incomingRequestCount =
+    activeMode === 'driver'
+      ? drivers
+          .filter((driver) => driver.driverAccountId === currentUser.id)
+          .reduce((total, driver) => total + driver.pendingRequests.length, 0)
+      : 0;
+
   const rideForm = (
     <RideForm
       currentUser={currentUser}
@@ -1360,6 +1775,8 @@ export default function App() {
       editingDriver={editingDriver}
       destinationInput={destinationInput}
       setDestinationInput={setDestinationInput}
+      pickupInput={pickupInput}
+      setPickupInput={setPickupInput}
       departureAtInput={departureAtInput}
       departurePickerMode={departurePickerMode}
       setDeparturePickerMode={setDeparturePickerMode}
@@ -1397,6 +1814,7 @@ export default function App() {
               drivers={drivers}
               sortedDrivers={sortedDrivers}
               riders={riders}
+              myRequestStatusByRideId={myRequestStatusByRideId}
               isBoardLoading={isBoardLoading}
               isRefreshing={isRefreshing}
               boardError={boardError}
@@ -1421,9 +1839,35 @@ export default function App() {
             />
           ) : (
             <SafeAreaView style={appStyles.tabScreen} edges={['top']}>
-              {activeTab === 'map' && <MapScreen onGoHome={handleGoHome} />}
+              {activeTab === 'map' && (
+                <MapScreen
+                  drivers={drivers}
+                  isBoardLoading={isBoardLoading}
+                  isRefreshing={isRefreshing}
+                  boardError={boardError}
+                  handleRefresh={handleRefresh}
+                  onOpenRide={handleOpenRideFromTab}
+                  onGoHome={handleGoHome}
+                />
+              )}
               {activeTab === 'requests' && (
-                <RequestsScreen activeMode={activeMode} onGoHome={handleGoHome} />
+                <RequestsScreen
+                  currentUser={currentUser}
+                  activeMode={activeMode}
+                  drivers={drivers}
+                  myRequestRows={myRequestRows}
+                  isBoardLoading={isBoardLoading}
+                  isRefreshing={isRefreshing}
+                  boardError={boardError}
+                  requestNotice={requestNotice}
+                  handleRefresh={handleRefresh}
+                  handleAcceptRequest={handleAcceptRequest}
+                  handleDenyRequest={handleDenyRequest}
+                  handleWithdrawRequest={handleWithdrawRequest}
+                  handleCancelConfirmedSeat={handleCancelConfirmedSeat}
+                  onOpenRide={handleOpenRideFromTab}
+                  onGoHome={handleGoHome}
+                />
               )}
               {activeTab === 'profile' &&
                 (isEditingProfile ? (
@@ -1461,7 +1905,12 @@ export default function App() {
           )}
         </View>
 
-        <TabBar activeTab={activeTab} onTabPress={handleTabPress} />
+        <DemoNetworkBanner />
+        <TabBar
+          activeTab={activeTab}
+          onTabPress={handleTabPress}
+          badges={{ requests: incomingRequestCount }}
+        />
       </View>
     </SafeAreaProvider>
   );

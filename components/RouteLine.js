@@ -4,9 +4,8 @@ import { colors, spacing, typography } from '../theme/theme';
 // Vertical pickup → destination route: a hollow dot for the start, a short
 // connector line, and a filled dot for the end.
 //
-// Rides don't store a pickup location yet (that arrives in the location
-// phase), so `pickup` is optional: without it only the destination stop is
-// drawn, labeled "Going to". Nothing is invented.
+// A ride's pickup spot is optional, so `pickup` is too: without it only the
+// destination stop is drawn, labeled "Going to". Nothing is invented.
 export default function RouteLine({ pickup, destination, tint = colors.primary, compact = false }) {
   const stopStyle = compact ? styles.stopTextCompact : styles.stopText;
 

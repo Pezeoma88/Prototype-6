@@ -12,6 +12,7 @@ import {
   MIN_SEATS,
   formatDeparture,
 } from '../lib/format';
+import { PICKUP_LOCATIONS, isSamePickup } from '../lib/pickupLocations';
 import { colors, radius, spacing, typography } from '../theme/theme';
 
 // Offer a Ride / Edit Ride form for Drivers, grouped into Route, When, and
@@ -23,6 +24,8 @@ export default function RideForm({
   editingDriver,
   destinationInput,
   setDestinationInput,
+  pickupInput,
+  setPickupInput,
   departureAtInput,
   departurePickerMode,
   setDeparturePickerMode,
@@ -37,6 +40,24 @@ export default function RideForm({
   resetForm,
 }) {
   const isEditing = editingRideId !== null;
+
+  // The choices for the pickup spot. A ride being edited whose saved pickup
+  // isn't one of the presets keeps it as an extra choice, so opening the
+  // form never silently changes where the ride leaves from.
+  const pickupOptions =
+    pickupInput !== null && !PICKUP_LOCATIONS.some((spot) => isSamePickup(spot, pickupInput))
+      ? [{ key: 'current', ...pickupInput }, ...PICKUP_LOCATIONS]
+      : PICKUP_LOCATIONS;
+
+  function handlePickPickup(spot) {
+    Keyboard.dismiss();
+    setDeparturePickerMode(null);
+    setPickupInput(
+      spot === null
+        ? null
+        : { latitude: spot.latitude, longitude: spot.longitude, label: spot.label }
+    );
+  }
 
   return (
     <View>
@@ -57,9 +78,57 @@ export default function RideForm({
           onFocus={() => setDeparturePickerMode(null)}
           returnKeyType="done"
           onSubmitEditing={Keyboard.dismiss}
-          hint="Pickup locations are coming in the map update."
           style={styles.lastField}
         />
+      </FormSection>
+
+      {/* Pickup is chosen from preset public landmarks rather than typed or
+          pinned, so it always has a readable name and is never a private
+          address. It's optional. */}
+      <FormSection title="Pickup spot (optional)" icon="location">
+        <View style={styles.pickupDisplay}>
+          <Ionicons
+            name={pickupInput !== null ? 'location' : 'location-outline'}
+            size={18}
+            color={pickupInput !== null ? colors.primary : colors.textFaint}
+          />
+          <Text
+            style={pickupInput !== null ? styles.departureText : styles.departurePlaceholder}
+            numberOfLines={1}
+          >
+            {pickupInput !== null ? pickupInput.label : 'No pickup spot'}
+          </Text>
+        </View>
+        <View style={styles.pickupChips}>
+          {[null, ...pickupOptions].map((spot) => {
+            const isActive = spot === null ? pickupInput === null : isSamePickup(spot, pickupInput);
+            return (
+              <Pressable
+                key={spot === null ? 'none' : spot.key}
+                onPress={() => handlePickPickup(spot)}
+                accessibilityRole="radio"
+                accessibilityState={{ selected: isActive }}
+                accessibilityLabel={spot === null ? 'No pickup spot' : spot.label}
+                style={({ pressed }) => [
+                  styles.pickupChip,
+                  isActive && styles.pickupChipActive,
+                  pressed && styles.pickerButtonPressed,
+                ]}
+              >
+                <Text
+                  style={[styles.pickupChipText, isActive && styles.pickupChipTextActive]}
+                  numberOfLines={1}
+                >
+                  {spot === null ? 'None' : spot.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+        <Text style={styles.pickupHint}>
+          Test locations: public SMU landmarks. A ride with a pickup spot appears on the Map tab;
+          without one it&apos;s still listed on Home.
+        </Text>
       </FormSection>
 
       {/* Departure is picked on native scrolling wheels instead of typed:
@@ -177,6 +246,48 @@ export default function RideForm({
 const styles = StyleSheet.create({
   lastField: {
     marginBottom: 0,
+  },
+  pickupDisplay: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 14,
+    minHeight: 50,
+    gap: 10,
+  },
+  pickupChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  pickupChip: {
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: 14,
+    maxWidth: '100%',
+  },
+  pickupChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  pickupChipText: {
+    ...typography.label,
+    color: colors.text,
+  },
+  pickupChipTextActive: {
+    color: colors.textOnAccent,
+  },
+  pickupHint: {
+    ...typography.caption,
+    color: colors.textMuted,
+    lineHeight: 17,
+    marginTop: spacing.md,
   },
   departureDisplay: {
     flexDirection: 'row',

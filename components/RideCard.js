@@ -14,9 +14,13 @@ import { colors, spacing, typography } from '../theme/theme';
 //   - your own ride, Driver mode:  Manage Ride
 //   - your own ride, Rider mode:   "Your ride" (switch to Driver to manage)
 //   - Rider mode:                  Request Ride (or its current status)
+// `myRequestStatus` is the signed-in person's request status for this ride
+// from Supabase, if any. A denied or cancelled request is final, so those
+// show as a status instead of a Request button.
 //   - anyone else:                 View Details
-// Rides have no pickup location yet, so RouteLine shows destination only.
-export default function RideCard({ ride, currentUser, activeMode, onView, onRequest }) {
+// A ride with a pickup spot shows it above the destination; without one,
+// RouteLine shows the destination only.
+export default function RideCard({ ride, currentUser, activeMode, myRequestStatus, onView, onRequest }) {
   const isOwn = ride.driverAccountId === currentUser.id;
   const isFull = ride.seats === 0;
   const isRider = activeMode === 'rider';
@@ -34,6 +38,10 @@ export default function RideCard({ ride, currentUser, activeMode, onView, onRequ
       primaryAction = <StatusPill icon="checkmark-circle" label="Seat confirmed" color={colors.success} />;
     } else if (alreadyPending) {
       primaryAction = <StatusPill icon="time" label="Request pending" color={colors.pending} />;
+    } else if (myRequestStatus === 'denied') {
+      primaryAction = <StatusPill icon="close-circle" label="Request denied" color={colors.danger} />;
+    } else if (myRequestStatus === 'cancelled') {
+      primaryAction = <StatusPill icon="close-circle" label="Request cancelled" color={colors.textMuted} />;
     } else {
       primaryAction = (
         <AppButton
@@ -74,7 +82,7 @@ export default function RideCard({ ride, currentUser, activeMode, onView, onRequ
       </View>
 
       <View style={styles.route}>
-        <RouteLine destination={ride.destination} tint={colors.driver} />
+        <RouteLine pickup={ride.pickup?.label} destination={ride.destination} tint={colors.driver} />
       </View>
 
       <View style={styles.metaRow}>

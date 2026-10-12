@@ -5,6 +5,7 @@ import AppButton from '../components/AppButton';
 import Badge from '../components/Badge';
 import FormSection from '../components/FormSection';
 import InfoRow from '../components/InfoRow';
+import DemoNetworkPanel from '../components/DemoNetworkPanel';
 import { colors, gutter, radius, roleColor, spacing, typography } from '../theme/theme';
 
 // Profile tab, laid out for the full Prototype 5 profile (photo, bio,
@@ -156,6 +157,11 @@ export default function ProfileScreen({
       </Text>
 
       <AppButton title="Log Out" icon="log-out-outline" variant="destructive" onPress={handleSignOut} />
+
+      {/* Development only: renders nothing in production builds. */}
+      <View style={styles.devTools}>
+        <DemoNetworkPanel />
+      </View>
     </ScrollView>
   );
 }
@@ -189,6 +195,9 @@ function PlaceholderText({ icon, text, detail, onPress }) {
 }
 
 const styles = StyleSheet.create({
+  devTools: {
+    marginTop: spacing.xxl,
+  },
   content: {
     paddingHorizontal: gutter,
     paddingTop: spacing.lg,

@@ -52,6 +52,7 @@ export default function HomeScreen({
   drivers,
   sortedDrivers,
   riders,
+  myRequestStatusByRideId,
   isBoardLoading,
   isRefreshing,
   boardError,
@@ -229,6 +230,7 @@ export default function HomeScreen({
                   ride={driver}
                   currentUser={currentUser}
                   activeMode={activeMode}
+                  myRequestStatus={myRequestStatusByRideId[driver.id] || null}
                   onView={() => handleViewRideDetails(driver.id)}
                   onRequest={() => handleQuickRequest(driver.id)}
                 />

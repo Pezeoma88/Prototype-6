@@ -7,6 +7,7 @@ import BackHeader from '../components/BackHeader';
 import FormSection from '../components/FormSection';
 import InfoRow from '../components/InfoRow';
 import Notice from '../components/Notice';
+import RequestSubmissionPanel from '../components/RequestSubmissionPanel';
 import RouteLine from '../components/RouteLine';
 import SectionHeader from '../components/SectionHeader';
 import TextField from '../components/TextField';
@@ -24,6 +25,13 @@ export default function RideDetailsScreen({
   activeMode,
   handleSwitchMode,
   requestNotice,
+  requestSubmission,
+  myRequestStatus,
+  handleAbandonSubmission,
+  handleRetrySubmission,
+  handleCheckSubmissionAgain,
+  handleDismissSubmission,
+  handleWithdrawArrivedRequest,
   isOwnerDriver,
   isOwnDetailsRide,
   reservingDriverId,
@@ -46,6 +54,23 @@ export default function RideDetailsScreen({
     // a seat from themselves.
     if (activeMode !== 'rider' || isOwnDetailsRide) {
       return null;
+    }
+
+    // A request for this ride is being sent, or its outcome is waiting to
+    // be read. This replaces the form, so nothing can be edited or sent a
+    // second time while the first is still in flight.
+    if (requestSubmission) {
+      return (
+        <RequestSubmissionPanel
+          submission={requestSubmission}
+          driverName={detailsDriver.name}
+          onAbandon={handleAbandonSubmission}
+          onRetry={handleRetrySubmission}
+          onCheckAgain={handleCheckSubmissionAgain}
+          onDismiss={handleDismissSubmission}
+          onWithdraw={handleWithdrawArrivedRequest}
+        />
+      );
     }
 
     if (reservingDriverId === detailsDriver.id) {
@@ -83,6 +108,9 @@ export default function RideDetailsScreen({
     const alreadyConfirmed = detailsDriver.matchedRiders.some((r) => r.id === currentUser.id);
     const alreadyPending = detailsDriver.pendingRequests.some((req) => req.riderId === currentUser.id);
 
+    // A denied or cancelled request is final: it can't be sent again.
+    const isTerminal = myRequestStatus === 'denied' || myRequestStatus === 'cancelled';
+
     let reserveLabel = 'Request This Ride';
     if (isFull) {
       reserveLabel = 'Full';
@@ -90,17 +118,27 @@ export default function RideDetailsScreen({
       reserveLabel = 'Already Confirmed';
     } else if (alreadyPending) {
       reserveLabel = 'Request Pending';
+    } else if (myRequestStatus === 'denied') {
+      reserveLabel = 'Request Denied';
+    } else if (myRequestStatus === 'cancelled') {
+      reserveLabel = 'Request Cancelled';
     }
-    const reserveDisabled = isFull || alreadyConfirmed || alreadyPending;
+    const reserveDisabled = isFull || alreadyConfirmed || alreadyPending || isTerminal;
 
     return (
-      <AppButton
-        title={reserveLabel}
-        icon={reserveDisabled ? undefined : 'hand-right-outline'}
-        onPress={() => handleBeginRequest(detailsDriver.id)}
-        disabled={reserveDisabled}
-        style={styles.block}
-      />
+      <View style={styles.block}>
+        <AppButton
+          title={reserveLabel}
+          icon={reserveDisabled ? undefined : 'hand-right-outline'}
+          onPress={() => handleBeginRequest(detailsDriver.id)}
+          disabled={reserveDisabled}
+        />
+        {isTerminal && !alreadyConfirmed && !alreadyPending && (
+          <Text style={styles.terminalText}>
+            A denied or cancelled request can&apos;t be sent again for this ride.
+          </Text>
+        )}
+      </View>
     );
   }
 
@@ -124,7 +162,11 @@ export default function RideDetailsScreen({
         </View>
 
         <View style={styles.route}>
-          <RouteLine destination={detailsDriver.destination} tint={colors.driver} />
+          <RouteLine
+            pickup={detailsDriver.pickup?.label}
+            destination={detailsDriver.destination}
+            tint={colors.driver}
+          />
         </View>
 
         <InfoRow icon="time-outline" label="Departs" value={detailsDriver.departureTime} divider />
@@ -383,6 +425,12 @@ const styles = StyleSheet.create({
   },
   buttonGap: {
     marginBottom: spacing.sm,
+  },
+  terminalText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    textAlign: 'center',
+    marginTop: spacing.sm,
   },
   ownerActions: {
     marginTop: spacing.xs,
