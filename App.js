@@ -61,6 +61,8 @@ export default function App() {
   // { id, driverAccountId, name, destination, pickup, departureAt,
   //   departureTime, totalSeats, seats, matchedRiders, pendingRequests }.
   // pickup is { latitude, longitude, label } or null when the ride has none.
+  // destinationPoint has the same shape: the optional mapped destination,
+  // separate from the typed `destination` text.
   // id is the ride's Supabase UUID; departureAt is a Date and departureTime
   // its display string. seats is the number of AVAILABLE seats
   // (totalSeats - accepted requests), so it only goes down on Accept.
@@ -147,6 +149,10 @@ export default function App() {
   // the preset list (lib/pickupLocations.js), or null for no pickup spot.
   // Optional: a ride without one just isn't shown on the Map tab.
   const [pickupInput, setPickupInput] = useState(null);
+  // The mapped destination chosen in the form, in the same shape, from the
+  // preset list (lib/destinationLocations.js), or null for none. Optional:
+  // without one (or without a pickup spot) the Map tab has no route to draw.
+  const [destinationPointInput, setDestinationPointInput] = useState(null);
 
   // The departure picked on the date/time wheels (a Date), or null until the
   // driver picks one. Saved to Supabase as rides.departure_at.
@@ -277,7 +283,7 @@ export default function App() {
       const { data: rideRows, error: ridesError } = await supabase
         .from('rides')
         .select(
-          'id, driver_id, destination, departure_at, seat_count, created_at, pickup_lat, pickup_lng, pickup_label'
+          'id, driver_id, destination, departure_at, seat_count, created_at, pickup_lat, pickup_lng, pickup_label, destination_lat, destination_lng, destination_label'
         )
         .order('created_at', { ascending: true })
         .order('id', { ascending: true });
@@ -729,6 +735,7 @@ export default function App() {
     setEditingRideId(driver.id);
     setDestinationInput(driver.destination);
     setPickupInput(driver.pickup);
+    setDestinationPointInput(driver.destinationPoint);
     setDepartureAtInput(driver.departureAt);
     setOriginalDepartureAt(driver.departureAt);
     setSeatsInput(String(driver.totalSeats));
@@ -749,6 +756,7 @@ export default function App() {
     setEditingRideId(null);
     setDestinationInput('');
     setPickupInput(null);
+    setDestinationPointInput(null);
     setDepartureAtInput(null);
     setOriginalDepartureAt(null);
     setDeparturePickerMode(null);
@@ -849,6 +857,13 @@ export default function App() {
       pickup_lng: pickupInput ? pickupInput.longitude : null,
       pickup_label: pickupInput ? pickupInput.label : null,
     };
+    // The mapped destination is optional too, and follows the same rule:
+    // coordinates and label are saved together or all cleared.
+    const destinationPointFields = {
+      destination_lat: destinationPointInput ? destinationPointInput.latitude : null,
+      destination_lng: destinationPointInput ? destinationPointInput.longitude : null,
+      destination_label: destinationPointInput ? destinationPointInput.label : null,
+    };
 
     try {
       if (editingDriver) {
@@ -876,6 +891,7 @@ export default function App() {
             departure_at: departureAtInput.toISOString(),
             seat_count: seatsNumber,
             ...pickupFields,
+            ...destinationPointFields,
           })
           .eq('id', editingDriver.id)
           .eq('driver_id', currentUser.id)
@@ -891,6 +907,7 @@ export default function App() {
           departure_at: departureAtInput.toISOString(),
           seat_count: seatsNumber,
           ...pickupFields,
+          ...destinationPointFields,
         });
         if (error) throw error;
       }
@@ -1777,6 +1794,8 @@ export default function App() {
       setDestinationInput={setDestinationInput}
       pickupInput={pickupInput}
       setPickupInput={setPickupInput}
+      destinationPointInput={destinationPointInput}
+      setDestinationPointInput={setDestinationPointInput}
       departureAtInput={departureAtInput}
       departurePickerMode={departurePickerMode}
       setDeparturePickerMode={setDeparturePickerMode}

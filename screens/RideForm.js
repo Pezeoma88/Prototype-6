@@ -12,6 +12,7 @@ import {
   MIN_SEATS,
   formatDeparture,
 } from '../lib/format';
+import { DESTINATION_LOCATIONS } from '../lib/destinationLocations';
 import { PICKUP_LOCATIONS, isSamePickup } from '../lib/pickupLocations';
 import { colors, radius, spacing, typography } from '../theme/theme';
 
@@ -26,6 +27,8 @@ export default function RideForm({
   setDestinationInput,
   pickupInput,
   setPickupInput,
+  destinationPointInput,
+  setDestinationPointInput,
   departureAtInput,
   departurePickerMode,
   setDeparturePickerMode,
@@ -41,22 +44,21 @@ export default function RideForm({
 }) {
   const isEditing = editingRideId !== null;
 
-  // The choices for the pickup spot. A ride being edited whose saved pickup
-  // isn't one of the presets keeps it as an extra choice, so opening the
-  // form never silently changes where the ride leaves from.
-  const pickupOptions =
-    pickupInput !== null && !PICKUP_LOCATIONS.some((spot) => isSamePickup(spot, pickupInput))
-      ? [{ key: 'current', ...pickupInput }, ...PICKUP_LOCATIONS]
-      : PICKUP_LOCATIONS;
-
   function handlePickPickup(spot) {
     Keyboard.dismiss();
     setDeparturePickerMode(null);
-    setPickupInput(
-      spot === null
-        ? null
-        : { latitude: spot.latitude, longitude: spot.longitude, label: spot.label }
-    );
+    setPickupInput(spot);
+  }
+
+  function handlePickDestinationPoint(spot) {
+    Keyboard.dismiss();
+    setDeparturePickerMode(null);
+    setDestinationPointInput(spot);
+    // Saves typing the same name twice. Text the driver already typed is
+    // never replaced.
+    if (spot !== null && destinationInput.trim() === '') {
+      setDestinationInput(spot.label);
+    }
   }
 
   return (
@@ -82,49 +84,33 @@ export default function RideForm({
         />
       </FormSection>
 
+      {/* The mapped destination is separate from the typed one above: it is
+          only ever picked from preset places, never worked out from the
+          text. It's optional. */}
+      <FormSection title="Destination on map (optional)" icon="flag">
+        <SpotPicker
+          value={destinationPointInput}
+          presets={DESTINATION_LOCATIONS}
+          emptyLabel="No map location"
+          onPick={handlePickDestinationPoint}
+        />
+        <Text style={styles.pickupHint}>
+          Pick the place that matches where you&apos;re going. With a pickup spot and a map
+          location, riders can view the route on the Map tab. Leave it as None if your destination
+          isn&apos;t listed.
+        </Text>
+      </FormSection>
+
       {/* Pickup is chosen from preset public landmarks rather than typed or
           pinned, so it always has a readable name and is never a private
           address. It's optional. */}
       <FormSection title="Pickup spot (optional)" icon="location">
-        <View style={styles.pickupDisplay}>
-          <Ionicons
-            name={pickupInput !== null ? 'location' : 'location-outline'}
-            size={18}
-            color={pickupInput !== null ? colors.primary : colors.textFaint}
-          />
-          <Text
-            style={pickupInput !== null ? styles.departureText : styles.departurePlaceholder}
-            numberOfLines={1}
-          >
-            {pickupInput !== null ? pickupInput.label : 'No pickup spot'}
-          </Text>
-        </View>
-        <View style={styles.pickupChips}>
-          {[null, ...pickupOptions].map((spot) => {
-            const isActive = spot === null ? pickupInput === null : isSamePickup(spot, pickupInput);
-            return (
-              <Pressable
-                key={spot === null ? 'none' : spot.key}
-                onPress={() => handlePickPickup(spot)}
-                accessibilityRole="radio"
-                accessibilityState={{ selected: isActive }}
-                accessibilityLabel={spot === null ? 'No pickup spot' : spot.label}
-                style={({ pressed }) => [
-                  styles.pickupChip,
-                  isActive && styles.pickupChipActive,
-                  pressed && styles.pickerButtonPressed,
-                ]}
-              >
-                <Text
-                  style={[styles.pickupChipText, isActive && styles.pickupChipTextActive]}
-                  numberOfLines={1}
-                >
-                  {spot === null ? 'None' : spot.label}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
+        <SpotPicker
+          value={pickupInput}
+          presets={PICKUP_LOCATIONS}
+          emptyLabel="No pickup spot"
+          onPick={handlePickPickup}
+        />
         <Text style={styles.pickupHint}>
           Test locations: public SMU landmarks. A ride with a pickup spot appears on the Map tab;
           without one it&apos;s still listed on Home.
@@ -239,6 +225,67 @@ export default function RideForm({
         style={styles.submit}
       />
       <AppButton title="Cancel" variant="secondary" onPress={resetForm} />
+    </View>
+  );
+}
+
+// The current choice plus a row of chips for picking a preset map spot (or
+// none). `value` is { latitude, longitude, label } or null. A ride being
+// edited whose saved spot isn't one of the presets keeps it as an extra
+// choice, so opening the form never silently changes it.
+function SpotPicker({ value, presets, emptyLabel, onPick }) {
+  const options =
+    value !== null && !presets.some((spot) => isSamePickup(spot, value))
+      ? [{ key: 'current', ...value }, ...presets]
+      : presets;
+
+  return (
+    <View>
+      <View style={styles.pickupDisplay}>
+        <Ionicons
+          name={value !== null ? 'location' : 'location-outline'}
+          size={18}
+          color={value !== null ? colors.primary : colors.textFaint}
+        />
+        <Text
+          style={value !== null ? styles.departureText : styles.departurePlaceholder}
+          numberOfLines={1}
+        >
+          {value !== null ? value.label : emptyLabel}
+        </Text>
+      </View>
+      <View style={styles.pickupChips}>
+        {[null, ...options].map((spot) => {
+          const isActive = spot === null ? value === null : isSamePickup(spot, value);
+          return (
+            <Pressable
+              key={spot === null ? 'none' : spot.key}
+              onPress={() =>
+                onPick(
+                  spot === null
+                    ? null
+                    : { latitude: spot.latitude, longitude: spot.longitude, label: spot.label }
+                )
+              }
+              accessibilityRole="radio"
+              accessibilityState={{ selected: isActive }}
+              accessibilityLabel={spot === null ? emptyLabel : spot.label}
+              style={({ pressed }) => [
+                styles.pickupChip,
+                isActive && styles.pickupChipActive,
+                pressed && styles.pickerButtonPressed,
+              ]}
+            >
+              <Text
+                style={[styles.pickupChipText, isActive && styles.pickupChipTextActive]}
+                numberOfLines={1}
+              >
+                {spot === null ? 'None' : spot.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
