@@ -4,10 +4,13 @@ import Badge from '../components/Badge';
 import Card from '../components/Card';
 import AppButton from '../components/AppButton';
 import BackHeader from '../components/BackHeader';
+import DriverReviewSection from '../components/DriverReviewSection';
 import FormSection from '../components/FormSection';
 import InfoRow from '../components/InfoRow';
 import Notice from '../components/Notice';
+import RatingSummary from '../components/RatingSummary';
 import RequestSubmissionPanel from '../components/RequestSubmissionPanel';
+import ReviewList from '../components/ReviewList';
 import RouteLine from '../components/RouteLine';
 import SectionHeader from '../components/SectionHeader';
 import TextField from '../components/TextField';
@@ -19,6 +22,12 @@ import { colors, radius, spacing, typography } from '../theme/theme';
 // App.js and arrives as props. Driver controls (Accept/Deny, Edit, Cancel)
 // need the ride's own driver in Driver mode; Request needs Rider mode. Your
 // own confirmed seat ("Leave") is yours in either mode.
+//
+// Reviews: the driver's average and reviews, and, for a rider with a
+// confirmed seat once the ride's scheduled departure arrives, the review form
+// (DriverReviewSection). Like your own seat, your review is yours in either
+// mode. Who may review is decided by the database; `reviewEligibility` only
+// picks what to show.
 export default function RideDetailsScreen({
   detailsDriver,
   currentUser,
@@ -46,6 +55,9 @@ export default function RideDetailsScreen({
   handleCancelReserve,
   handleStartEditRide,
   handleCancelRide,
+  driverReviews,
+  reviewEligibility,
+  handleSubmitReview,
 }) {
   const isFull = detailsDriver.seats === 0;
 
@@ -158,6 +170,7 @@ export default function RideDetailsScreen({
               <Badge label="Driver" tone="driver" />
               {isOwnDetailsRide && <Badge label="Your ride" tone="primary" />}
             </View>
+            <RatingSummary rating={detailsDriver.driverRating} style={styles.ratingRow} />
           </View>
         </View>
 
@@ -189,6 +202,17 @@ export default function RideDetailsScreen({
       </Card>
 
       {requestNotice !== '' && <Notice message={requestNotice} />}
+
+      {/* Rate the driver. Placed first so "Rate Driver" on the Requests tab
+          lands right on the form. Keyed by ride so a message from one ride
+          never shows on another. */}
+      <DriverReviewSection
+        key={detailsDriver.id}
+        driverName={detailsDriver.name}
+        eligibility={reviewEligibility}
+        onSubmit={(rating, comment) => handleSubmitReview(detailsDriver.id, rating, comment)}
+        style={styles.block}
+      />
 
       {/* The rider's own action comes first so Request is visible right away. */}
       {renderRiderAction()}
@@ -306,6 +330,20 @@ export default function RideDetailsScreen({
         </View>
       )}
 
+      {/* The driver's reviews from every ride, newest first */}
+      <SectionHeader
+        title={`Reviews of ${detailsDriver.name}`}
+        role="driver"
+        right={<RatingSummary rating={detailsDriver.driverRating} />}
+      />
+      <View style={styles.block}>
+        <ReviewList
+          reviews={driverReviews}
+          currentUserId={currentUser.id}
+          emptyText={`${detailsDriver.name} has no reviews yet.`}
+        />
+      </View>
+
       {isOwnerDriver && (
         <View style={styles.ownerActions}>
           <AppButton
@@ -351,6 +389,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.sm,
     marginTop: 6,
+  },
+  ratingRow: {
+    marginTop: spacing.sm,
   },
   route: {
     marginTop: spacing.xl,

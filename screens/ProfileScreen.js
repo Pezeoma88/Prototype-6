@@ -5,14 +5,17 @@ import AppButton from '../components/AppButton';
 import Badge from '../components/Badge';
 import FormSection from '../components/FormSection';
 import InfoRow from '../components/InfoRow';
+import RatingSummary from '../components/RatingSummary';
+import ReviewList from '../components/ReviewList';
 import DemoNetworkPanel from '../components/DemoNetworkPanel';
 import { colors, gutter, radius, roleColor, spacing, typography } from '../theme/theme';
 
 // Profile tab, laid out for the full Prototype 5 profile (photo, bio,
 // vehicle, ratings, reviews). Photo, name, email, bio, and vehicle
 // make/model are real, saved in Supabase and changed from Edit Profile.
-// Ratings and reviews don't exist yet, so they show an honest placeholder:
-// nothing here is made up.
+// Ratings and reviews are the real ones riders left (driver_reviews):
+// `myDriverRating` is { average, count }, null with none yet, or undefined
+// when they couldn't be loaded; `myDriverReviews` is the list, or null.
 //
 // One profile works in both modes. The Mode card switches between Driver
 // and Rider (App's activeMode) without signing out; the sections below
@@ -24,6 +27,8 @@ export default function ProfileScreen({
   handleSwitchMode,
   handleStartEditProfile,
   handleSignOut,
+  myDriverRating,
+  myDriverReviews,
 }) {
   const isDriver = activeMode === 'driver';
   const tint = roleColor(activeMode);
@@ -43,12 +48,7 @@ export default function ProfileScreen({
           tone={isDriver ? 'driver' : 'rider'}
           style={styles.roleBadge}
         />
-        {isDriver && (
-          <View style={styles.ratingRow}>
-            <Ionicons name="star-outline" size={15} color={colors.textMuted} />
-            <Text style={styles.ratingText}>No ratings yet</Text>
-          </View>
-        )}
+        {isDriver && <RatingSummary rating={myDriverRating} stars style={styles.ratingRow} />}
         <AppButton
           title="Edit Profile"
           icon="create-outline"
@@ -116,12 +116,21 @@ export default function ProfileScreen({
           </FormSection>
 
           {/* Reviews (Driver only) */}
-          <FormSection title="Reviews" icon="star-outline" tint={tint}>
-            <PlaceholderText
-              icon="chatbubbles-outline"
-              text="No reviews yet"
-              detail="Riders who complete a trip with you will be able to rate it."
-            />
+          <FormSection
+            title="Reviews"
+            icon="star-outline"
+            tint={tint}
+            right={<RatingSummary rating={myDriverRating} />}
+          >
+            {myDriverReviews !== null && myDriverReviews.length === 0 ? (
+              <PlaceholderText
+                icon="chatbubbles-outline"
+                text="No reviews yet"
+                detail="Riders with a confirmed seat can rate your ride once it departs."
+              />
+            ) : (
+              <ReviewList reviews={myDriverReviews} currentUserId={currentUser.id} />
+            )}
           </FormSection>
         </>
       ) : (
@@ -229,11 +238,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginTop: spacing.sm,
-  },
-  ratingText: {
-    ...typography.label,
-    color: colors.textMuted,
-    marginLeft: 5,
   },
   editButton: {
     marginTop: spacing.lg,

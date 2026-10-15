@@ -22,6 +22,12 @@ import {
 } from './lib/board';
 import { AvatarError, pickAvatarImage, uploadAvatar } from './lib/avatar';
 import {
+  getReviewEligibility,
+  loadReviewData,
+  submitDriverReview,
+  toReviewDisplay,
+} from './lib/reviews';
+import {
   CONFIRM_CHECK_DELAYS_MS,
   confirmRideRequestOutcome,
   lookupRideRequest,
@@ -201,6 +207,24 @@ export default function App() {
     myRequestRows.map((row) => [row.ride_id, row.status])
   );
 
+  // Driver reviews from the last load (lib/reviews.js): every review of the
+  // drivers on the board and of the signed-in person, plus every review the
+  // signed-in person wrote. null when they couldn't be loaded, so screens
+  // can say so instead of showing "No reviews yet".
+  const [reviewRows, setReviewRows] = useState(null);
+  // Review count and average per driver id ({ average, count }), or null
+  // when they couldn't be loaded. A driver with no reviews isn't in it.
+  const [ratingSummaries, setRatingSummaries] = useState(null);
+  // The signed-in person's own review per ride id, from reviewRows.
+  const myReviewByRideId = {};
+  if (reviewRows && currentUser) {
+    for (const row of reviewRows) {
+      if (row.rider_id === currentUser.id && row.ride_id) {
+        myReviewByRideId[row.ride_id] = row;
+      }
+    }
+  }
+
   // Guards against a fast double-tap firing the same Supabase change twice.
   const isBoardActionRunningRef = useRef(false);
 
@@ -296,10 +320,25 @@ export default function App() {
         .order('created_at', { ascending: true });
       if (requestsError) throw requestsError;
 
+      // Reviews are an add-on: if they can't be loaded, the board still
+      // loads and screens show that reviews are unavailable.
+      const myProfileId = currentUserIdRef.current;
+      let reviewData = null;
+      try {
+        reviewData = await loadReviewData({
+          driverIds: rideRows.map((ride) => ride.driver_id),
+          myProfileId,
+        });
+      } catch (error) {
+        console.warn('CarpoolBoard: failed to load driver reviews', error);
+      }
+
       const profileIds = [
         ...new Set([
           ...rideRows.map((ride) => ride.driver_id),
           ...requestRows.map((req) => req.rider_id),
+          // Review authors, so reviews can show who wrote them.
+          ...(reviewData ? reviewData.reviewRows.map((row) => row.rider_id) : []),
         ]),
       ];
       let profileMap = {};
@@ -315,7 +354,6 @@ export default function App() {
       }
 
       // The signed-in person's own requests, including denied/cancelled.
-      const myProfileId = currentUserIdRef.current;
       let myRows = [];
       if (myProfileId) {
         const { data: myRequestData, error: myRequestsError } = await supabase
@@ -333,7 +371,16 @@ export default function App() {
 
       setProfilesById(profileMap);
       setActiveRequestRows(requestRows);
-      setDrivers(buildDriversFromRows(rideRows, requestRows, profileMap));
+      setReviewRows(reviewData ? reviewData.reviewRows : null);
+      setRatingSummaries(reviewData ? reviewData.ratingSummaries : null);
+      setDrivers(
+        buildDriversFromRows(
+          rideRows,
+          requestRows,
+          profileMap,
+          reviewData ? reviewData.ratingSummaries : null
+        )
+      );
       setBoardError('');
       return true;
     } catch (error) {
@@ -1509,6 +1556,25 @@ export default function App() {
     );
   }
 
+  // Sends the signed-in rider's review of a ride's driver, then reloads the
+  // board so the review, the driver's average and every Rate Driver button
+  // reflect what the server now holds. Resolves with submitDriverReview's
+  // result for the review form to show. The form prevents a second send
+  // while one is in flight, and sending the same review again is safe.
+  async function handleSubmitReview(rideId, rating, comment) {
+    if (!currentUser) {
+      return { kind: 'refused', message: 'Please sign in again.' };
+    }
+    const result = await submitDriverReview({
+      rideId,
+      riderId: currentUser.id,
+      rating,
+      comment,
+    });
+    await loadBoard();
+    return result;
+  }
+
   // Opens a ride's details from the Map or Requests tab. Ride Details lives
   // on the Home tab, so this switches there first.
   function handleOpenRideFromTab(driverId) {
@@ -1612,6 +1678,37 @@ export default function App() {
     detailsDriver.driverAccountId === currentUser.id;
   const isCurrentUserWaiting =
     currentUser !== null && riders.some((rider) => rider.id === currentUser.id);
+
+  // Driver reviews for the open ride's driver, newest first (null when
+  // reviews couldn't be loaded), and whether the signed-in person can
+  // review this ride.
+  const detailsDriverReviews =
+    detailsDriver === null || reviewRows === null
+      ? null
+      : reviewRows
+          .filter((row) => row.driver_id === detailsDriver.driverAccountId)
+          .map((row) => toReviewDisplay(row, profilesById));
+  const detailsReviewEligibility =
+    detailsDriver === null || currentUser === null || reviewRows === null
+      ? { status: 'not_eligible' }
+      : getReviewEligibility({
+          ride: detailsDriver,
+          requestRow: myRequestRows.find((row) => row.ride_id === detailsDriver.id) || null,
+          myReview: myReviewByRideId[detailsDriver.id] || null,
+          currentUserId: currentUser.id,
+        });
+  // The signed-in person's own rating as a driver, for Profile: undefined
+  // when unknown, null with no reviews yet.
+  const myDriverRating =
+    currentUser === null || ratingSummaries === null
+      ? undefined
+      : ratingSummaries[currentUser.id] || null;
+  const myDriverReviews =
+    currentUser === null || reviewRows === null
+      ? null
+      : reviewRows
+          .filter((row) => row.driver_id === currentUser.id)
+          .map((row) => toReviewDisplay(row, profilesById));
   // The Submit Ride Request state to show on the open ride: only the
   // signed-in rider's own submission for exactly this ride, in Rider mode.
   const detailsSubmission =
@@ -1773,6 +1870,9 @@ export default function App() {
         handleCancelReserve={handleCancelReserve}
         handleStartEditRide={handleStartEditRide}
         handleCancelRide={handleCancelRide}
+        driverReviews={detailsDriverReviews}
+        reviewEligibility={detailsReviewEligibility}
+        handleSubmitReview={handleSubmitReview}
       />
     ) : null;
 
@@ -1884,6 +1984,8 @@ export default function App() {
                   handleDenyRequest={handleDenyRequest}
                   handleWithdrawRequest={handleWithdrawRequest}
                   handleCancelConfirmedSeat={handleCancelConfirmedSeat}
+                  myReviewByRideId={myReviewByRideId}
+                  reviewsLoaded={reviewRows !== null}
                   onOpenRide={handleOpenRideFromTab}
                   onGoHome={handleGoHome}
                 />
@@ -1918,6 +2020,8 @@ export default function App() {
                     handleSwitchMode={handleSwitchMode}
                     handleStartEditProfile={handleStartEditProfile}
                     handleSignOut={handleSignOut}
+                    myDriverRating={myDriverRating}
+                    myDriverReviews={myDriverReviews}
                   />
                 ))}
             </SafeAreaView>

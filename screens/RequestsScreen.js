@@ -8,11 +8,16 @@ import EmptyState from '../components/EmptyState';
 import Notice from '../components/Notice';
 import ScreenHeader from '../components/ScreenHeader';
 import SectionHeader from '../components/SectionHeader';
+import StarRating from '../components/StarRating';
+import { formatDeparture } from '../lib/format';
+import { getReviewEligibility } from '../lib/reviews';
 import { colors, gutter, radius, spacing, typography } from '../theme/theme';
 
 // Requests tab: every request in one place, following the current mode.
 //   Rider mode   the requests I've sent, grouped by status, with View Ride,
-//                Withdraw (pending) and Leave Seat (confirmed).
+//                Withdraw (pending) and Leave Seat (confirmed). A confirmed
+//                ride whose scheduled departure has arrived gets Rate Driver,
+//                which opens its Ride Details at the review form.
 //   Driver mode  the requests waiting on my rides, with Accept / Deny, and
 //                each ride's confirmed passengers.
 // Everything shown comes from the same Supabase load as the Home board, and
@@ -42,6 +47,8 @@ export default function RequestsScreen({
   handleDenyRequest,
   handleWithdrawRequest,
   handleCancelConfirmedSeat,
+  myReviewByRideId,
+  reviewsLoaded,
   onOpenRide,
   onGoHome,
 }) {
@@ -108,6 +115,18 @@ export default function RequestsScreen({
                 <Text style={styles.finalText}>
                   This request can&apos;t be sent again for this ride.
                 </Text>
+              )}
+
+              {reviewsLoaded && (
+                <ReviewPrompt
+                  eligibility={getReviewEligibility({
+                    ride,
+                    requestRow: row,
+                    myReview: myReviewByRideId[ride.id] || null,
+                    currentUserId: currentUser.id,
+                  })}
+                  onRate={() => onOpenRide(ride.id)}
+                />
               )}
 
               <View style={styles.actions}>
@@ -312,6 +331,39 @@ export default function RequestsScreen({
   );
 }
 
+// Rate Driver for a ride the rider can review now, their rating once they
+// have, or when reviews open. Nothing for any other request.
+function ReviewPrompt({ eligibility, onRate }) {
+  if (eligibility.status === 'eligible') {
+    return (
+      <AppButton
+        title="Rate Driver"
+        icon="star-outline"
+        variant="rider"
+        size="sm"
+        onPress={onRate}
+        style={styles.rateButton}
+      />
+    );
+  }
+  if (eligibility.status === 'reviewed') {
+    return (
+      <View style={styles.reviewedRow}>
+        <StarRating value={eligibility.review.rating} size={14} />
+        <Text style={styles.reviewedText}>You rated this driver</Text>
+      </View>
+    );
+  }
+  if (eligibility.status === 'too_early') {
+    return (
+      <Text style={styles.finalText}>
+        You can rate this driver at departure time, {formatDeparture(eligibility.opensAt)}.
+      </Text>
+    );
+  }
+  return null;
+}
+
 // Destination, pickup spot (when the ride has one) and departure time.
 function RideFacts({ ride }) {
   return (
@@ -469,5 +521,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.sm,
     marginTop: spacing.md,
+  },
+  rateButton: {
+    marginTop: spacing.md,
+  },
+  reviewedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: spacing.sm,
+  },
+  reviewedText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginLeft: spacing.sm,
   },
 });

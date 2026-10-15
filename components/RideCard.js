@@ -4,6 +4,7 @@ import Card from './Card';
 import Avatar from './Avatar';
 import Badge from './Badge';
 import AppButton from './AppButton';
+import RatingSummary from './RatingSummary';
 import RouteLine from './RouteLine';
 import { colors, spacing, typography } from '../theme/theme';
 
@@ -19,7 +20,8 @@ import { colors, spacing, typography } from '../theme/theme';
 // show as a status instead of a Request button.
 //   - anyone else:                 View Details
 // A ride with a pickup spot shows it above the destination; without one,
-// RouteLine shows the destination only.
+// RouteLine shows the destination only. The driver's average rating and
+// review count sit under their name (ride.driverRating).
 export default function RideCard({ ride, currentUser, activeMode, myRequestStatus, onView, onRequest }) {
   const isOwn = ride.driverAccountId === currentUser.id;
   const isFull = ride.seats === 0;
@@ -74,6 +76,7 @@ export default function RideCard({ ride, currentUser, activeMode, myRequestStatu
                   : 'Driver · offering seats'}
             </Text>
           </View>
+          <RatingSummary rating={ride.driverRating} style={styles.ratingRow} />
         </View>
         <Badge
           label={isFull ? 'Full' : `${ride.seats} seat${ride.seats === 1 ? '' : 's'} left`}
@@ -146,6 +149,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginTop: 2,
+  },
+  ratingRow: {
+    marginTop: 3,
   },
   subText: {
     ...typography.caption,
