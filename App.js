@@ -21,6 +21,7 @@ import {
   profileToAccount,
 } from './lib/board';
 import { AvatarError, pickAvatarImage, uploadAvatar } from './lib/avatar';
+import { isValidCoordinate } from './lib/pickupLocations';
 import {
   getReviewEligibility,
   loadReviewData,
@@ -150,10 +151,11 @@ export default function App() {
   // The current text typed into the form's inputs. The driver's name isn't
   // one of them: it comes from the signed-in account when the ride is posted.
   const [destinationInput, setDestinationInput] = useState('');
-  const [seatsInput, setSeatsInput] = useState('');
+  // New rides start at the minimum seat count; the form's stepper adjusts it.
+  const [seatsInput, setSeatsInput] = useState(String(MIN_SEATS));
   // The pickup spot chosen in the form: { latitude, longitude, label } from
   // the preset list (lib/pickupLocations.js), or null for no pickup spot.
-  // Optional: a ride without one just isn't shown on the Map tab.
+  // Required to post or save a ride (checked in handleSaveDriver).
   const [pickupInput, setPickupInput] = useState(null);
   // The mapped destination chosen in the form, in the same shape, from the
   // preset list (lib/destinationLocations.js), or null for none. Optional:
@@ -178,6 +180,14 @@ export default function App() {
   // True while a Post Ride press is being handled, so a fast double-tap
   // can't post the same ride twice before the form has a chance to close.
   const [isSubmittingDriver, setIsSubmittingDriver] = useState(false);
+
+  // The ride Supabase just confirmed saving, shown on the "Ride posted"
+  // screen in place of the form: { destination, departureAt, seats,
+  // wasEdit, canEdit }, or null while the form itself is showing. canEdit is
+  // false if Supabase didn't return the new ride's id, which hides "Edit ride
+  // details". The form's values are kept underneath so that button reopens
+  // them.
+  const [rideConfirmation, setRideConfirmation] = useState(null);
 
   // Lets us scroll back to the top (Available Rides) after saving a ride.
   const scrollViewRef = useRef(null);
@@ -788,6 +798,7 @@ export default function App() {
     setSeatsInput(String(driver.totalSeats));
     setDeparturePickerMode(null);
     setFormError('');
+    setRideConfirmation(null);
     setSelectedRideDriverId(null);
     setReservingDriverId(null);
     setRequestNotice('');
@@ -807,9 +818,25 @@ export default function App() {
     setDepartureAtInput(null);
     setOriginalDepartureAt(null);
     setDeparturePickerMode(null);
-    setSeatsInput('');
+    setSeatsInput(String(MIN_SEATS));
     setFormError('');
     setIsSubmittingDriver(false);
+    setRideConfirmation(null);
+  }
+
+  // "Edit ride details" on the Ride posted screen: back to the form with
+  // everything still filled in. The form is already pointed at the saved
+  // ride, so saving again updates it instead of posting a duplicate.
+  function handleEditPostedRide() {
+    setRideConfirmation(null);
+    setFormError('');
+    scrollViewRef.current?.scrollTo({ y: 0, animated: false });
+  }
+
+  // "Back to Home" on the Ride posted screen.
+  function handleFinishPostedRide() {
+    resetForm();
+    scrollViewRef.current?.scrollTo({ y: 0, animated: true });
   }
 
   // Shows (or hides, if it's already showing) the date or time wheel.
@@ -865,11 +892,16 @@ export default function App() {
       originalDepartureAt !== null &&
       departureAtInput.getTime() === originalDepartureAt.getTime();
 
-    // Validation: destination can't be empty, a departure must be picked and
-    // be in the future, and seats must be a whole number from MIN_SEATS to
-    // MAX_SEATS. When editing, an unchanged departure is allowed as-is.
+    // Validation: destination can't be empty, a pickup spot is required, a
+    // departure must be picked and be in the future, and seats must be a
+    // whole number from MIN_SEATS to MAX_SEATS. When editing, an unchanged
+    // departure is allowed as-is. Returning early keeps everything entered.
     if (trimmedDestination === '') {
       setFormError('Please enter a destination.');
+      return;
+    }
+    if (pickupInput === null || !isValidCoordinate(pickupInput.latitude, pickupInput.longitude)) {
+      setFormError('Select a pickup spot.');
       return;
     }
     if (departureAtInput === null || Number.isNaN(departureAtInput.getTime())) {
@@ -897,8 +929,12 @@ export default function App() {
     setIsSubmittingDriver(true);
     setFormError('');
 
-    // The pickup spot is optional. All three columns are saved together, or
-    // all cleared, which is what the database's pickup checks require.
+    // The id of the ride that was saved, so the form can keep editing that
+    // same row afterwards.
+    let savedRideId = editingDriver ? editingDriver.id : null;
+
+    // The pickup spot is required (validated above). All three columns are
+    // saved together, which is what the database's pickup checks require.
     const pickupFields = {
       pickup_lat: pickupInput ? pickupInput.latitude : null,
       pickup_lng: pickupInput ? pickupInput.longitude : null,
@@ -948,15 +984,21 @@ export default function App() {
           throw new Error('No ride was updated.');
         }
       } else {
-        const { error } = await supabase.from('rides').insert({
-          driver_id: currentUser.id,
-          destination: trimmedDestination,
-          departure_at: departureAtInput.toISOString(),
-          seat_count: seatsNumber,
-          ...pickupFields,
-          ...destinationPointFields,
-        });
+        const { data, error } = await supabase
+          .from('rides')
+          .insert({
+            driver_id: currentUser.id,
+            destination: trimmedDestination,
+            departure_at: departureAtInput.toISOString(),
+            seat_count: seatsNumber,
+            ...pickupFields,
+            ...destinationPointFields,
+          })
+          .select('id');
         if (error) throw error;
+        // Not using .single(): the insert has already succeeded here, so a
+        // missing id must not turn into an error that invites a re-post.
+        savedRideId = data && data.length > 0 ? data[0].id : null;
       }
     } catch (error) {
       console.warn('CarpoolBoard: saving ride failed', error);
@@ -969,12 +1011,28 @@ export default function App() {
       return;
     }
 
-    // Success: dismiss the keyboard, close/reset the form, reload the board,
-    // and scroll back up so the ride is visible in Available Rides right away.
+    // Success: Supabase has confirmed the save, so show the Ride posted
+    // screen. The form keeps its values and now edits the saved ride, so
+    // "Edit ride details" followed by another save updates that row rather
+    // than inserting a second one.
     Keyboard.dismiss();
-    resetForm();
+    setDeparturePickerMode(null);
+    setDestinationInput(trimmedDestination);
+    setSeatsInput(String(seatsNumber));
+    if (savedRideId !== null) {
+      setEditingRideId(savedRideId);
+      setOriginalDepartureAt(departureAtInput);
+    }
+    setRideConfirmation({
+      destination: trimmedDestination,
+      departureAt: departureAtInput,
+      seats: seatsNumber,
+      wasEdit: editingDriver !== null,
+      canEdit: savedRideId !== null,
+    });
+    setIsSubmittingDriver(false);
+    scrollViewRef.current?.scrollTo({ y: 0, animated: false });
     await loadBoard();
-    scrollViewRef.current?.scrollTo({ y: 0, animated: true });
   }
 
   // Opens the Ride Details screen for a driver. This is the Available Rides -> Ride Details step.
@@ -1908,6 +1966,9 @@ export default function App() {
       isSubmittingDriver={isSubmittingDriver}
       handleSaveDriver={handleSaveDriver}
       resetForm={resetForm}
+      rideConfirmation={rideConfirmation}
+      handleEditPostedRide={handleEditPostedRide}
+      handleFinishPostedRide={handleFinishPostedRide}
     />
   );
 

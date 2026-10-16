@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Keyboard, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import Ionicons from '@react-native-vector-icons/ionicons';
@@ -5,20 +6,39 @@ import AppButton from '../components/AppButton';
 import BackHeader from '../components/BackHeader';
 import FormSection from '../components/FormSection';
 import Notice from '../components/Notice';
-import TextField from '../components/TextField';
+import RidePostedCard from '../components/RidePostedCard';
+import SearchableSelect from '../components/SearchableSelect';
 import {
   DEPARTURE_MINUTE_INTERVAL,
   MAX_SEATS,
   MIN_SEATS,
-  formatDeparture,
+  formatDepartureDate,
+  formatDepartureTime,
 } from '../lib/format';
 import { DESTINATION_LOCATIONS } from '../lib/destinationLocations';
-import { PICKUP_LOCATIONS, isSamePickup } from '../lib/pickupLocations';
+import { PICKUP_LOCATIONS, isSamePickup, isValidCoordinate } from '../lib/pickupLocations';
 import { colors, radius, spacing, typography } from '../theme/theme';
+
+// The destination preset whose name matches the typed destination, if any.
+function findDestinationPreset(text) {
+  const wanted = text.trim().toLowerCase();
+  return DESTINATION_LOCATIONS.find((spot) => spot.label.toLowerCase() === wanted) || null;
+}
+
+// A map point ({ latitude, longitude, label }) from a preset, or null when
+// the preset is missing or has no usable coordinates, so a broken point can
+// never reach the form state or Supabase.
+function toPoint(spot) {
+  if (!spot || !isValidCoordinate(spot.latitude, spot.longitude)) {
+    return null;
+  }
+  return { latitude: spot.latitude, longitude: spot.longitude, label: spot.label };
+}
 
 // Offer a Ride / Edit Ride form for Drivers, grouped into Route, When, and
 // Seats sections. State, validation, and saving stay in App.js; this
-// component only renders them.
+// component only renders them. Once Supabase confirms a save, the Ride
+// posted screen is shown here instead of the form.
 export default function RideForm({
   currentUser,
   editingRideId,
@@ -41,8 +61,31 @@ export default function RideForm({
   isSubmittingDriver,
   handleSaveDriver,
   resetForm,
+  rideConfirmation,
+  handleEditPostedRide,
+  handleFinishPostedRide,
 }) {
   const isEditing = editingRideId !== null;
+
+  // Whether the mapped destination was filled in automatically from the
+  // destination preset (true) or picked by the driver (false). Only an
+  // automatic one follows later destination changes; a driver's own pick is
+  // never overwritten. A saved ride whose map location matches its
+  // destination preset counts as automatic.
+  const [isPointAuto, setIsPointAuto] = useState(() => {
+    const preset = findDestinationPreset(destinationInput);
+    return preset !== null && destinationPointInput !== null && isSamePickup(preset, destinationPointInput);
+  });
+
+  if (rideConfirmation) {
+    return (
+      <RidePostedCard
+        ride={rideConfirmation}
+        onBackToHome={handleFinishPostedRide}
+        onEdit={handleEditPostedRide}
+      />
+    );
+  }
 
   function handlePickPickup(spot) {
     Keyboard.dismiss();
@@ -50,15 +93,77 @@ export default function RideForm({
     setPickupInput(spot);
   }
 
+  // Picking a destination preset also maps it, unless the driver already
+  // chose a map location themselves. SearchableSelect hands back only
+  // { key, label }, so the coordinates come from the preset list.
+  function handleSelectDestination(option) {
+    setDestinationInput(option.label);
+    const point = toPoint(DESTINATION_LOCATIONS.find((spot) => spot.key === option.key));
+    if (point !== null && (destinationPointInput === null || isPointAuto)) {
+      setDestinationPointInput(point);
+      setIsPointAuto(true);
+    }
+  }
+
+  // Typing away from a preset drops the map location it filled in, so the
+  // map never shows a place the destination no longer names.
+  function handleChangeDestinationText(text) {
+    setDestinationInput(text);
+    if (isPointAuto && destinationPointInput !== null && text.trim() !== destinationPointInput.label) {
+      setDestinationPointInput(null);
+      setIsPointAuto(false);
+    }
+  }
+
+  function handleClearDestination() {
+    setDestinationInput('');
+    if (isPointAuto) {
+      setDestinationPointInput(null);
+      setIsPointAuto(false);
+    }
+  }
+
   function handlePickDestinationPoint(spot) {
-    Keyboard.dismiss();
     setDeparturePickerMode(null);
     setDestinationPointInput(spot);
+    setIsPointAuto(false);
     // Saves typing the same name twice. Text the driver already typed is
     // never replaced.
     if (spot !== null && destinationInput.trim() === '') {
       setDestinationInput(spot.label);
     }
+  }
+
+  const destinationOptions = DESTINATION_LOCATIONS.map((spot) => ({ key: spot.key, label: spot.label }));
+  const selectedDestination = findDestinationPreset(destinationInput);
+
+  // A ride being edited whose saved map location isn't one of the presets
+  // keeps it as an extra choice, so opening the form never silently changes it.
+  const savedPointIsCustom =
+    destinationPointInput !== null &&
+    !DESTINATION_LOCATIONS.some((spot) => isSamePickup(spot, destinationPointInput));
+  const mapSpots = savedPointIsCustom
+    ? [{ key: 'current', ...destinationPointInput }, ...DESTINATION_LOCATIONS]
+    : DESTINATION_LOCATIONS;
+  const selectedMapSpot =
+    destinationPointInput === null
+      ? null
+      : mapSpots.find((spot) => isSamePickup(spot, destinationPointInput)) || null;
+
+  // Seats: the driver isn't counted. When editing, total seats can't drop
+  // below the riders already confirmed (App.js re-checks this on save).
+  const confirmedRiders = editingDriver !== null ? editingDriver.matchedRiders.length : 0;
+  const minSeats = Math.max(MIN_SEATS, confirmedRiders);
+  const parsedSeats = parseInt(seatsInput, 10);
+  const seats = Number.isNaN(parsedSeats) ? minSeats : parsedSeats;
+  const canDecrease = seats > minSeats;
+  const canIncrease = seats < MAX_SEATS;
+
+  function changeSeats(delta) {
+    Keyboard.dismiss();
+    setDeparturePickerMode(null);
+    const next = Math.min(MAX_SEATS, Math.max(minSeats, seats + delta));
+    setSeatsInput(String(next));
   }
 
   return (
@@ -70,41 +175,55 @@ export default function RideForm({
         subtitle={`${isEditing ? 'Editing' : 'Posting'} as ${currentUser.name}`}
       />
 
+      {/* Destination: one searchable field instead of a list of buttons.
+          Presets are suggested as the driver types, but any text can still
+          be used. The mapped destination below is optional and separate:
+          it only ever comes from the preset places, never from typed text. */}
       <FormSection title="Route" icon="navigate">
-        <TextField
+        <SearchableSelect
           label="Where are you going?"
           icon="flag-outline"
-          placeholder="Destination (e.g. Campus Library)"
+          placeholder="Search destinations"
           value={destinationInput}
-          onChangeText={setDestinationInput}
+          options={destinationOptions}
+          selectedKey={selectedDestination ? selectedDestination.key : null}
+          onSelect={handleSelectDestination}
+          onClear={handleClearDestination}
+          freeText
+          onChangeText={handleChangeDestinationText}
+          emptyMessage="No matching destinations. You can still use what you typed."
           onFocus={() => setDeparturePickerMode(null)}
-          returnKeyType="done"
-          onSubmitEditing={Keyboard.dismiss}
-          style={styles.lastField}
         />
-      </FormSection>
 
-      {/* The mapped destination is separate from the typed one above: it is
-          only ever picked from preset places, never worked out from the
-          text. It's optional. */}
-      <FormSection title="Destination on map (optional)" icon="flag">
-        <SpotPicker
-          value={destinationPointInput}
-          presets={DESTINATION_LOCATIONS}
-          emptyLabel="No map location"
-          onPick={handlePickDestinationPoint}
+        <SearchableSelect
+          label="Destination on map (optional)"
+          icon="map-outline"
+          placeholder="No map location"
+          value={destinationPointInput !== null ? destinationPointInput.label : ''}
+          options={mapSpots.map((spot) => ({ key: spot.key, label: spot.label }))}
+          selectedKey={selectedMapSpot ? selectedMapSpot.key : null}
+          onSelect={(option) => {
+            const point = toPoint(mapSpots.find((spot) => spot.key === option.key));
+            if (point !== null) {
+              handlePickDestinationPoint(point);
+            }
+          }}
+          onClear={() => handlePickDestinationPoint(null)}
+          noneLabel="None"
+          onFocus={() => setDeparturePickerMode(null)}
+          style={styles.mapField}
         />
         <Text style={styles.pickupHint}>
-          Pick the place that matches where you&apos;re going. With a pickup spot and a map
-          location, riders can view the route on the Map tab. Leave it as None if your destination
-          isn&apos;t listed.
+          {isPointAuto && destinationPointInput !== null
+            ? 'Mapped from your destination. Change it if the place is different.'
+            : 'With a pickup spot and a map location, riders can view the route on the Map tab.'}
         </Text>
       </FormSection>
 
       {/* Pickup is chosen from preset public landmarks rather than typed or
           pinned, so it always has a readable name and is never a private
-          address. It's optional. */}
-      <FormSection title="Pickup spot (optional)" icon="location">
+          address. It's required to post or save a ride. */}
+      <FormSection title="Pickup spot" icon="location">
         <SpotPicker
           value={pickupInput}
           presets={PICKUP_LOCATIONS}
@@ -112,56 +231,55 @@ export default function RideForm({
           onPick={handlePickPickup}
         />
         <Text style={styles.pickupHint}>
-          Test locations: public SMU landmarks. A ride with a pickup spot appears on the Map tab;
-          without one it&apos;s still listed on Home.
+          Test locations: public SMU landmarks. Riders see your ride on the Map tab at this spot.
         </Text>
       </FormSection>
 
       {/* Departure is picked on native scrolling wheels instead of typed:
-          one wheel for the day and one for the time, combined into a single
-          Date. On iPhone the wheels appear inline (spinner style); on
-          Android the system date/time dialogs are used. */}
+          tapping the Date or Time tile opens one wheel, and the two picks
+          combine into a single Date. On iPhone the wheels appear inline
+          (spinner style); on Android the system date/time dialogs are used. */}
       <FormSection title="When are you leaving?" icon="calendar">
-        <View style={styles.departureDisplay}>
-          <Ionicons
-            name="time-outline"
-            size={18}
-            color={departureAtInput !== null ? colors.primary : colors.textFaint}
-          />
-          <Text
-            style={departureAtInput !== null ? styles.departureText : styles.departurePlaceholder}
-            numberOfLines={1}
-          >
-            {departureAtInput !== null
-              ? formatDeparture(departureAtInput)
-              : 'Choose a departure date and time'}
-          </Text>
-        </View>
-
-        <View style={styles.pickerButtons}>
+        <View style={styles.tiles}>
           {[
-            { mode: 'date', label: 'Date', icon: 'calendar-outline' },
-            { mode: 'time', label: 'Time', icon: 'time-outline' },
-          ].map((option) => {
-            const isActive = departurePickerMode === option.mode;
+            {
+              mode: 'date',
+              label: 'Date',
+              icon: 'calendar-outline',
+              value: departureAtInput !== null ? formatDepartureDate(departureAtInput) : null,
+            },
+            {
+              mode: 'time',
+              label: 'Time',
+              icon: 'time-outline',
+              value: departureAtInput !== null ? formatDepartureTime(departureAtInput) : null,
+            },
+          ].map((tile) => {
+            const isActive = departurePickerMode === tile.mode;
             return (
               <Pressable
-                key={option.mode}
-                onPress={() => handleToggleDeparturePicker(option.mode)}
+                key={tile.mode}
+                onPress={() => handleToggleDeparturePicker(tile.mode)}
                 accessibilityRole="button"
+                accessibilityLabel={`Departure ${tile.label.toLowerCase()}, ${tile.value ?? 'not chosen'}`}
+                accessibilityHint={isActive ? 'Closes the picker' : 'Opens a picker to change it'}
+                accessibilityState={{ expanded: isActive }}
                 style={({ pressed }) => [
-                  styles.pickerButton,
-                  isActive && styles.pickerButtonActive,
+                  styles.tile,
+                  isActive && styles.tileActive,
                   pressed && styles.pickerButtonPressed,
                 ]}
               >
-                <Ionicons
-                  name={isActive ? 'checkmark' : option.icon}
-                  size={16}
-                  color={isActive ? colors.textOnAccent : colors.primary}
-                />
-                <Text style={[styles.pickerButtonText, isActive && styles.pickerButtonTextActive]}>
-                  {isActive ? 'Done' : `Pick ${option.label}`}
+                <View style={styles.tileHeader}>
+                  <Ionicons name={tile.icon} size={14} color={colors.primary} />
+                  <Text style={styles.tileLabel}>{tile.label}</Text>
+                  {isActive && <Text style={styles.tileDone}>Done</Text>}
+                </View>
+                <Text
+                  style={tile.value !== null ? styles.tileValue : styles.tilePlaceholder}
+                  numberOfLines={1}
+                >
+                  {tile.value ?? `Choose ${tile.label.toLowerCase()}`}
                 </Text>
               </Pressable>
             );
@@ -187,32 +305,40 @@ export default function RideForm({
         )}
       </FormSection>
 
-      {/* iOS has no Return key on a number pad, but pairing
-          returnKeyType="done" with a number-pad keyboardType makes iOS show
-          its own native "Done" toolbar above the keyboard, which fires
-          onSubmitEditing below. That's what actually dismisses the keyboard
-          on a real device, so no custom accessory bar is rendered here.
-          Digits are filtered as typed so only whole numbers land. */}
-      <FormSection title="Seats" icon="people">
-        <TextField
-          label="How many seats can you offer?"
-          icon="person-add-outline"
-          placeholder={`Open seats (${MIN_SEATS}–${MAX_SEATS})`}
-          value={seatsInput}
-          onChangeText={(text) => setSeatsInput(text.replace(/[^0-9]/g, ''))}
-          onFocus={() => setDeparturePickerMode(null)}
-          keyboardType="number-pad"
-          returnKeyType="done"
-          onSubmitEditing={Keyboard.dismiss}
-          hint={
-            editingDriver !== null && editingDriver.matchedRiders.length > 0
-              ? `${editingDriver.matchedRiders.length} confirmed rider${
-                  editingDriver.matchedRiders.length === 1 ? '' : 's'
-                } — total seats can't go below that.`
-              : `Between ${MIN_SEATS} and ${MAX_SEATS}, not counting yourself.`
-          }
-          style={styles.lastField}
-        />
+      <FormSection title="Available seats" icon="people">
+        <View style={styles.stepper}>
+          <StepperButton
+            icon="remove"
+            label="Remove a seat"
+            disabled={!canDecrease}
+            onPress={() => changeSeats(-1)}
+          />
+          <View
+            style={styles.stepperValue}
+            accessible
+            accessibilityRole="adjustable"
+            accessibilityLabel="Available seats"
+            accessibilityValue={{ min: minSeats, max: MAX_SEATS, now: seats, text: `${seats}` }}
+            accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+            onAccessibilityAction={(event) =>
+              changeSeats(event.nativeEvent.actionName === 'increment' ? 1 : -1)
+            }
+          >
+            <Text style={styles.stepperCount}>{seats}</Text>
+            <Text style={styles.stepperUnit}>{seats === 1 ? 'seat' : 'seats'}</Text>
+          </View>
+          <StepperButton
+            icon="add"
+            label="Add a seat"
+            disabled={!canIncrease}
+            onPress={() => changeSeats(1)}
+          />
+        </View>
+        <Text style={styles.pickupHint}>
+          {confirmedRiders > 0
+            ? `${confirmedRiders} confirmed rider${confirmedRiders === 1 ? '' : 's'} — total seats can't go below that.`
+            : `Between ${MIN_SEATS} and ${MAX_SEATS}, not counting yourself.`}
+        </Text>
       </FormSection>
 
       {formError !== '' && <Notice message={formError} tone="danger" style={styles.error} />}
@@ -226,6 +352,25 @@ export default function RideForm({
       />
       <AppButton title="Cancel" variant="secondary" onPress={resetForm} />
     </View>
+  );
+}
+
+function StepperButton({ icon, label, disabled, onPress }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled }}
+      style={({ pressed }) => [
+        styles.stepperButton,
+        disabled && styles.stepperButtonDisabled,
+        pressed && !disabled && styles.stepperButtonPressed,
+      ]}
+    >
+      <Ionicons name={icon} size={22} color={disabled ? colors.textFaint : colors.textOnAccent} />
+    </Pressable>
   );
 }
 
@@ -291,8 +436,8 @@ function SpotPicker({ value, presets, emptyLabel, onPick }) {
 }
 
 const styles = StyleSheet.create({
-  lastField: {
-    marginBottom: 0,
+  mapField: {
+    marginTop: spacing.md,
   },
   pickupDisplay: {
     flexDirection: 'row',
@@ -334,18 +479,7 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textMuted,
     lineHeight: 17,
-    marginTop: spacing.md,
-  },
-  departureDisplay: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surfaceRaised,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: 14,
-    minHeight: 50,
-    gap: 10,
+    marginTop: spacing.sm,
   },
   departureText: {
     ...typography.bodyStrong,
@@ -358,36 +492,52 @@ const styles = StyleSheet.create({
     color: colors.textFaint,
     flex: 1,
   },
-  pickerButtons: {
+  tiles: {
     flexDirection: 'row',
     gap: spacing.sm,
-    marginTop: spacing.md,
   },
-  pickerButton: {
+  tile: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
+    backgroundColor: colors.surfaceRaised,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: colors.borderStrong,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
     paddingVertical: 10,
+    minHeight: 60,
+    justifyContent: 'center',
   },
-  pickerButtonActive: {
-    backgroundColor: colors.primary,
+  tileActive: {
     borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
   },
-  pickerButtonPressed: {
-    opacity: 0.7,
+  tileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginBottom: 3,
   },
-  pickerButtonText: {
-    fontSize: 14,
+  tileLabel: {
+    ...typography.caption,
+    color: colors.textMuted,
+    flex: 1,
+  },
+  tileDone: {
+    ...typography.caption,
     fontWeight: '700',
     color: colors.primary,
   },
-  pickerButtonTextActive: {
-    color: colors.textOnAccent,
+  tileValue: {
+    ...typography.bodyStrong,
+    fontSize: 16,
+    color: colors.text,
+  },
+  tilePlaceholder: {
+    fontSize: 16,
+    color: colors.textFaint,
+  },
+  pickerButtonPressed: {
+    opacity: 0.7,
   },
   pickerBox: {
     backgroundColor: colors.surfaceRaised,
@@ -396,6 +546,45 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     marginTop: spacing.md,
     overflow: 'hidden',
+  },
+  stepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm,
+  },
+  stepperButton: {
+    width: 48,
+    height: 48,
+    borderRadius: radius.sm,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepperButtonPressed: {
+    backgroundColor: colors.primaryPressed,
+  },
+  stepperButtonDisabled: {
+    backgroundColor: colors.muted,
+  },
+  stepperValue: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  stepperCount: {
+    ...typography.display,
+    color: colors.text,
+  },
+  stepperUnit: {
+    ...typography.body,
+    color: colors.textMuted,
   },
   error: {
     marginTop: spacing.xs,
